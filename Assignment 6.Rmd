@@ -1,0 +1,772 @@
+---
+title: "Rebalancing Bikeshare in Boston"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+author: "Yihong Hu"
+date: "11/15/2021"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "hide"
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = FALSE, Warning = FALSE, Message = FALSE, cache = TRUE)
+```
+
+# Introduction
+
+Bike share system provides shared bike services for short travelling purposes. One may borrow a bike at a bike-share station, and return it at another station within the same system close to the destination. The system may be operated by a private company or a public municipality, usually with a fee.
+
+"Re-balancing", in terms of a bike share system, refers to the process of reallocating available bikes at a given time according to the demand. Failure to meet the demand is undesirable for both the users and the bike share companies -- the former loss a mean of transportation and the later loss potential revenue. Therefore it is important to have a sense of how many people will pickup a bike at a certain time and station -- in order to redistribute excessive bikes at other locations to stations that actually have high demand. Usually re-balancing will take place manually by small trucks to move the bikes around. 
+
+The analysis below will examine the bike demand in Boston, MA in August and September 2019. "Bluebikes" is a private company that operates the bike share system in the city. It employs 4-5 rebalancing vans, each with a payload of 20-25 bikes, to redistribute bicycles 24 hours a day, 7 days a week. A regression model is developed based on weather and one-hour to one-week time lag to predict the number of trips that occur at a particular time and station. Since the company is redistributing bikes every hour, one-hour time lag is appropriate, because that will allow the van-driver to know an hour beforehand on the demand of bikes at different locations. Other time lags are added to strengthen the model.
+
+```{r setup_13, cache=TRUE, message=FALSE, include = FALSE}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gganimate)
+library(gifski)
+library(caret)
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
+
+root.dir = "https://github.com/Bamboo-Forest-Rain/Public-Policy-Analytics-Landing/tree/master/DATA"
+source("https://raw.githubusercontent.com/Bamboo-Forest-Rain/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+```
+
+```{r install_census_API_key, warning = FALSE, include=FALSE, eval = TRUE}
+# Install Census API Key
+census_api_key("e79f3706b6d61249968c6ce88794f6f556e5bf3d", overwrite = TRUE)
+```
+
+## Import Bike Trip Data 
+
+Data from August and September 2019 is used, because the temperaturere in Boston is pretty pleasant during that time of the year. The data is downloaded from Bluebikes website, which is public for all.  
+
+```{r Input Data and create time bins}
+dat <- rbind(read.csv("201908boston.csv"),read.csv("201909boston.csv"))
+
+dat2 <- dat %>%
+  mutate(interval60 = floor_date(ymd_hms(starttime), unit = "hour"),
+         interval15 = floor_date(ymd_hms(starttime), unit = "15 mins"),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+```
+
+```{r get_census, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+BostonCensus <- 
+  get_acs(geography = "tract", 
+          variables = c("B01003_001", "B19013_001", 
+                        "B02001_002", "B08013_001",
+                        "B08012_001", "B08301_001", 
+                        "B08301_010", "B01002_001"), 
+          year = 2019, 
+          state = "MA", 
+          geometry = TRUE, 
+          county=c("Suffolk"),
+          output = "wide") %>%
+  rename(Total_Pop =  B01003_001E,
+         Med_Inc = B19013_001E,
+         Med_Age = B01002_001E,
+         White_Pop = B02001_002E,
+         Travel_Time = B08013_001E,
+         Num_Commuters = B08012_001E,
+         Means_of_Transport = B08301_001E,
+         Total_Public_Trans = B08301_010E) %>%
+  select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
+         Means_of_Transport, Total_Public_Trans,
+         Med_Age,
+         GEOID, geometry) %>%
+  mutate(Percent_White = White_Pop / Total_Pop,
+         Mean_Commute_Time = Travel_Time / Total_Public_Trans,
+         Percent_Taking_Public_Trans = Total_Public_Trans / Means_of_Transport)
+
+BostonTracts <- 
+  BostonCensus %>%
+  as.data.frame() %>%
+  distinct(GEOID, .keep_all = TRUE) %>%
+  select(GEOID, geometry) %>% 
+  st_sf
+
+```
+
+```{r add_census_tracts , message = FALSE, warning = FALSE}
+dat_census <- st_join(dat2 %>% 
+          filter(is.na(start.station.longitude) == FALSE &
+                   is.na(start.station.latitude) == FALSE &
+                   is.na(end.station.latitude) == FALSE &
+                   is.na(end.station.longitude) == FALSE) %>%
+          st_as_sf(., coords = c("start.station.longitude", "start.station.latitude"), crs = "EPSG:4269"),
+        BostonTracts%>%
+          st_transform(crs="EPSG:4269"),
+        join=st_intersects,
+              left = TRUE) %>%
+   rename(Origin.Tract = GEOID) %>%
+  mutate(start.station.longitude = unlist(map(geometry, 1)),
+         start.station.latitude = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)%>%
+  st_as_sf(., coords = c("end.station.longitude", "end.station.latitude"), crs = "EPSG:4269") %>%
+  st_join(., BostonTracts %>%
+            st_transform(crs="EPSG:4269"),
+          join=st_intersects,
+          left = TRUE) %>%
+  rename(Destination.Tract = GEOID)  %>%
+  mutate(end.station.longitude = unlist(map(geometry, 1)),
+         end.station.latitude = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)
+```
+
+## Weather Data
+
+We take the weather records measured by Logan Airport in Boston (code name is "BOS") by the function "riem_measures". We can assume that the weather measured by the airport can be applied to the city, because they are all in the same region. 
+
+```{r import_weather, message = FALSE, warning = FALSE }
+weather.Panel <- 
+  riem_measures(station = "BOS", date_start = "2019-08-01", date_end = "2019-09-30") %>%
+  dplyr::select(valid, tmpf, p01i, sknt)%>%
+  replace(is.na(.), 0) %>%
+    mutate(interval60 = ymd_h(substr(valid,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60, label=TRUE)) %>%
+    group_by(interval60) %>%
+    summarize(Temperature = max(tmpf),
+              Precipitation = sum(p01i),
+              Wind_Speed = max(sknt)) %>%
+    mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+```
+
+```{r plot_weather, catche = TRUE}
+grid.arrange(
+  ggplot(weather.Panel, aes(interval60,Precipitation)) + geom_line() + 
+  labs(title="Percipitation", x="Hour", y="Perecipitation") + plotTheme(),
+  ggplot(weather.Panel, aes(interval60,Wind_Speed)) + geom_line() + 
+    labs(title="Wind Speed", x="Hour", y="Wind Speed") + plotTheme(),
+  ggplot(weather.Panel, aes(interval60,Temperature)) + geom_line() + 
+    labs(title="Temperature", x="Hour", y="Temperature") + plotTheme(),
+  top="Fig. 1 Weather Data - Boston Logan - August and September, 2019")
+```
+
+Fig.1 displays the weather conditions on an hourly basis from August 1, 2019 to September 30, 2019. 
+
+# Examine the Relationship between Bike Demand and Time/Space
+
+We can now analyse the data by generating number of trips and time on an hourly basis. 
+
+```{r trip_timeseries }
+ggplot(dat_census %>%
+         group_by(interval60) %>%
+         tally())+
+  geom_line(aes(x = interval60, y = n))+
+  labs(title="Bike share trips per hr. Boston, August and September, 2019",
+       x="Date", 
+       y="Number of trips", caption = "Fig 2")+
+  plotTheme()
+```
+
+We may detect a pattern in Fig 2. The trips are occurring at a consistent trend weekly. For every ten spikes, there are two dips. The two dips occur during the weekends, and the ten spikes occur during the weekday with two rush hours: one in the morning and one in the evening. Note that there is a sharp decrease on Sept. 2, that was the labour day in 2019. 
+
+## Rush Hours
+
+From Fig. 2, we can see that some hours have consistently high demand. It is worthwhile to categorize time into ranges based on these rush hours and see if they play a big role in telling the number of trips.
+
+```{r mean_trips_hist, warning = FALSE, message = FALSE }
+dat_census %>%
+        mutate(time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+         group_by(interval60, start.station.name, time_of_day) %>%
+         tally()%>%
+  group_by(start.station.name, time_of_day)%>%
+  summarize(mean_trips = mean(n))%>%
+  ggplot()+
+  geom_histogram(aes(mean_trips), binwidth = 1)+
+  labs(title="Mean Number of Hourly Trips Per Station. Boston, August and Sepetember, 2019",
+       x="Number of trips", 
+       y="Frequency", caption = "Fig 3")+
+  facet_wrap(~time_of_day)+
+  plotTheme()
+```
+
+The more spread-out AM and PM rush plots in Fig 3. suggest that the number of trips increases as we hit these rush hours. 
+
+## Day of the week
+
+Is there a difference between weekend and weekday? Intuitively, we would like to assume that more bikes are used during weekday as more people commute to work and less during weekends. 
+
+```{r trips_hour_dotw }
+ggplot(dat_census %>% mutate(hour = hour(starttime)))+
+     geom_freqpoly(aes(hour, color = dotw), binwidth = 1)+
+  labs(title="Bike share trips in Chicago, by day of the week, August and September, 2019",
+       x="Hour", 
+       y="Trip Counts", caption = "Fig 4")+
+     plotTheme()
+
+
+ggplot(dat_census %>% 
+         mutate(hour = hour(starttime),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday")))+
+     geom_freqpoly(aes(hour, color = weekend), binwidth = 1)+
+  labs(title="Bike share trips in Boston - weekend vs weekday, August\n and September, 2019",
+       x="Hour", 
+       y="Trip Counts", caption = "Fig 5")+
+     plotTheme()
+```
+
+Fig 4 plots the number of trips by day of the week. Monday to Friday have very close trend, while Saturday and Sunday, as expected, have lower number of trips.
+
+Fig 5 plots categorize number of trips into weekday and weekend by hour. We can again see that there are two spikes at rush hours during weekdays. Weekends generally have much lower bike usage, and bikes are mostly used in the afternoon to the evening (12 PM - 18 PM). 
+
+## Station Usage Per hour
+
+We can also examine the station usage by hour. This allows us to see if some stations are just idle at certain hours. 
+
+```{r trips_station_dotw }
+ggplot(dat_census %>%
+         group_by(interval60, start.station.name) %>%
+         tally())+
+  geom_histogram(aes(n), binwidth = 5)+
+  labs(title="Bike share trips per hr by station",subtitle="Boston, August and September, 2019",
+       x="Trip Counts", 
+       y="Number of Stations", caption = "Fig 6")+
+  plotTheme()
+```
+
+We can actually see from Fig 6. that many stations are unused at some hours. We can also see that some particular stations have high demands -- more than 20 times within an hour.
+
+## Bikeshare per Hour by Station
+
+To visualize if there is a location bias for bike share, a map is created to show number of trips taken at each station across different time. 
+
+```{r origin_map }
+DAT_MAp <-               
+dat_census %>% 
+            mutate(hour = hour(starttime),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+                time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+  group_by(start.station.id, start.station.latitude, start.station.longitude, weekend, time_of_day) %>%
+              tally() %>%
+  st_as_sf(coords = c("start.station.longitude", "start.station.latitude"), crs = "EPSG:4269") 
+
+DAT_MAp <-
+  st_intersection(DAT_MAp, BostonCensus)
+  
+ggplot()+
+  geom_sf(data = BostonTracts %>%
+          st_transform(crs= 4326))+
+  geom_sf(data = DAT_MAp,
+            aes(color = n))+
+  scale_color_viridis(discrete = FALSE, option = "D",direction = -1)+
+  facet_grid(weekend ~ time_of_day)+
+  labs(title="Bike share trips per hr by station. Boston, August and September, 2019", color = "Trip Count", caption="Fig 7")+
+  mapTheme()
+  
+```
+
+It is clear from Fig 7 that, no matter the time, ride demand seems to cluster over the center around the Back Bay area, represented by darker green. 
+
+In short, we can see that ride demand is very time and space dependent. All the figures above show re-balancing should be more frequent during weekdays than weekends, because demand variation during weekends is small. The demand spikes during AM and PM rush hours, so probably more van drivers need to be hired during that time to shift bikes more efficiently. 
+
+## Ride Animation
+
+We can show the difference of ride demand across time and space by animating the data. For the sake of limited computing capacity, we will only animate the demand on the first day of August based on a 15 minutes interval. 
+
+```{r Adding 1 week Panel Animated Map}
+week31 <-
+  filter(dat2, week == 31 & dotw == "Mon")
+
+week31.panel <-
+  expand.grid(
+    interval15 = unique(week31$interval15),
+    start.station.name = unique(dat2$start.station.name))
+
+```
+
+```{r ride animation data, message = FALSE}
+station <- read.csv("current_bluebikes_stations.csv") %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"),crs = "EPSG:4269")
+
+station$Name <-
+  as.character(station$Name) 
+
+station <-
+  st_intersection(station,BostonCensus)
+
+ride.animation.data <-
+    mutate(week31, Trip_Counter = 1) %>%
+    right_join(week31.panel) %>% 
+    group_by(interval15, start.station.name) %>%
+    summarize(Trip_Count = sum(Trip_Counter, na.rm=T)) %>% 
+    ungroup() %>% 
+    left_join(station, by=c("start.station.name" = "Name")) %>%
+    st_sf() %>%
+    mutate(Trips = case_when(Trip_Count == 0 ~ "0 trips",
+                             Trip_Count > 0 & Trip_Count <= 3 ~ "1-3 trips",
+                             Trip_Count > 3 & Trip_Count <= 6 ~ "4-6 trips",
+                             Trip_Count > 6 & Trip_Count <= 10 ~ "7-10 trips",
+                             Trip_Count > 10 ~ "11+ trips")) %>%
+    mutate(Trips  = fct_relevel(Trips, "0 trips","1-3 trips","4-6 trips",
+                                       "7-10 trips","10+ trips"))
+
+```
+
+```{r Rideshare animation, warning = FALSE, results = TRUE}
+
+rideshare_animation <-
+  ggplot() +
+    geom_point(data = st_centroid(ride.animation.data), aes(size = Trip_Count,geometry=geometry),stat="sf_coordinates") +
+    scale_color_manual(values = palette5) +
+    labs(title = "Bikeshare pickup for one day in August 2019",
+         subtitle = "15 minute intervals: {current_frame}",
+         size = "Trip Count") +
+    transition_manual(interval15)+
+  geom_sf(data=BostonCensus,fill="transparent",color = "gray")+
+  mapTheme()
+
+animate(rideshare_animation, duration=20, renderer = gifski_renderer())
+```
+
+# Develop and Run Regression Models for Demand Prediction
+
+## Create Space-Time Panel
+
+A study panel is created to ensure that every unique station is included and we will convert "NA"s into zero, so that they can be included in the regression. We will then join the panel with Boston census data, to ensure only the stations within Boston are analysed. This new panel is called the ride panel. 
+
+Due to computer's limited capacity, only the data from first five weeks in August and September are selected for ride panel. 
+
+```{r Study Panel, class.source = 'fold-show', message = FALSE}
+study.panel <- 
+  expand.grid(interval60=unique(dat_census$interval60), 
+              start.station.id = unique(dat_census$start.station.id)) %>%
+  left_join(., dat_census %>%
+              select(start.station.id, start.station.name, Origin.Tract, start.station.longitude, start.station.latitude )%>%
+              distinct() %>%
+              group_by(start.station.id) %>%
+              slice(1))
+```
+
+
+```{r create_panel , message = FALSE, class.source = 'fold-show'}
+ride.panel <- 
+  dat_census %>%
+  mutate(Trip_Counter = 1) %>%
+  right_join(study.panel) %>% 
+  group_by(interval60, start.station.id, start.station.name, Origin.Tract, start.station.longitude, start.station.latitude) %>%
+  summarize(Trip_Count = sum(Trip_Counter, na.rm=T)) %>%
+  left_join(weather.Panel) %>%
+  ungroup() %>%
+  filter(is.na(start.station.id) == FALSE) %>%
+  mutate(week = week(interval60),
+         dotw = wday(interval60, label = TRUE)) %>%
+  filter(is.na(Origin.Tract) == FALSE)
+```
+
+
+```{r census_and_panel , message = FALSE, class.source = 'fold-show'}
+ride.panel <- 
+  left_join(ride.panel, BostonCensus %>%
+              as.data.frame() %>%
+              select(-geometry), by = c("Origin.Tract" = "GEOID"))
+```
+
+## Create time lags
+
+Time lag helps us to determine the relationship between the current trip number and the previous trip number at a given time. Intuitively, the shorter the time frame, the stronger the correlation. For example, the demands before and after one hour have a stronger relationship than that of four hours. Also, the demand today at a given time should be similar to the demand at this time tomorrow. The demand on a  Monday should be reflective of the demand on next Monday. 
+
+The ride panel is created with time lags of 1 hour, 2 hours, 3 hours, 4 hours, 12 hours, 1 day (24 hours), and 1 week. The demand correlation is evaluated on each lag by r-squared. 
+
+```{r time_lags , message = FALSE}
+ride.panel <- 
+  ride.panel %>% 
+  arrange(start.station.id, interval60) %>% 
+  mutate(lagHour = dplyr::lag(Trip_Count,1),
+         lag2Hours = dplyr::lag(Trip_Count,2),
+         lag3Hours = dplyr::lag(Trip_Count,3),
+         lag4Hours = dplyr::lag(Trip_Count,4),
+         lag12Hours = dplyr::lag(Trip_Count,12),
+         lag1day = dplyr::lag(Trip_Count,24),
+         lag1week = dplyr::lag(Trip_Count,168),
+         holiday = ifelse(yday(interval60) == 148,1,0)) %>%
+   mutate(day = yday(interval60)) %>%
+   mutate(holidayLag = case_when(dplyr::lag(holiday, 1) == 1 ~ "PlusOneDay",
+                                 dplyr::lag(holiday, 2) == 1 ~ "PlustTwoDays",
+                                 dplyr::lag(holiday, 3) == 1 ~ "PlustThreeDays",
+                                 dplyr::lead(holiday, 1) == 1 ~ "MinusOneDay",
+                                 dplyr::lead(holiday, 2) == 1 ~ "MinusTwoDays",
+                                 dplyr::lead(holiday, 3) == 1 ~ "MinusThreeDays"),
+         holidayLag = replace_na(holidayLag, 0))
+
+```
+
+```{r evaluate_lags , warning = FALSE, message = FALSE, results='asis'}
+as.data.frame(ride.panel) %>%
+    group_by(interval60) %>% 
+    summarise_at(vars(starts_with("lag"), "Trip_Count"), mean, na.rm = TRUE) %>%
+    gather(Variable, Value, -interval60, -Trip_Count) %>%
+    mutate(Variable = factor(Variable, levels=c("lagHour","lag2Hours","lag3Hours","lag4Hours",
+                                                "lag12Hours","lag1day","lag1week")))%>%
+    group_by(Variable) %>%  
+    summarize(correlation = round(cor(Value, Trip_Count),2))%>%
+  kable(caption = "Table 1. Bikeride Demand Correlation based on Time Lag Measured by R-square")%>%kable_styling()
+```
+
+Table 1 validates our hypothesis. We see that 1 hour lag, 1 day lag, and 1 week lag have the strongest correlation between demands. The week lag is the strongest, meaning the weekly demand for bike rides is very similar.
+
+
+## Models
+
+The ride panel is further separated into a training set and a testing set. We wil train the model on the first three weeks, and test it on the last two weeks. We don't randomly generate training and testing sets, because they are very time dependent. 
+
+The data for all five weeks will be combined to a new panel. This panel is going to be used for cross-validation. 
+
+```{r train_test }
+ride.Train <- filter(ride.panel, week == 31 | week == 32 | week == 33)
+ride.Test <- filter(ride.panel, week == 34 | week == 35)
+ride.panel5week <- rbind(ride.Train,ride.Test)
+```
+
+```{r four models, class.source = 'fold-show'}
+reg1 <- 
+    lm(Trip_Count ~  hour(interval60) + dotw + Temperature,  data=ride.Train)
+
+reg2 <- 
+  lm(Trip_Count ~  start.station.name + dotw + Temperature,  data=ride.Train)
+
+reg3 <- 
+  lm(Trip_Count ~  start.station.name + hour(interval60) + dotw + Temperature + Precipitation, 
+     data=ride.Train)
+
+reg4 <- 
+  lm(Trip_Count ~  start.station.name +  hour(interval60) + dotw + Temperature + Precipitation + lagHour + lag2Hours +lag3Hours + lag12Hours + lag1day + lag1week, 
+     data=ride.Train)
+```
+
+Four models are developed here. Reg1 considers hour, day of the week, temperature as factors of ride share demand. Reg2 adds a location factor (station.station.name). Reg3 adds precipitation as another factor on to Reg2.Reg4 has everything from Reg3, but also including lag time factors. We will examine how each regression perform based on errors.
+
+## Predict for test data
+
+We will predict the data based on the test set. Here, we will nest the data in to matrix. Nesting allows us to run models over two week at once, instead of separating each week out and run the regression individually. 
+
+Four regressions are run over the two weeks in the testing set. 
+
+```{r nest_data, message = FALSE}
+ride.Test.weekNest <- 
+  ride.Test %>%
+  nest(-week) 
+```
+
+```{r predict_function }
+model_pred <- function(dat, fit){
+   pred <- predict(fit, newdata = dat)}
+```
+
+```{r do_predicitons, results = TRUE}
+week_predictions <- 
+  ride.Test.weekNest %>% 
+    mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+           BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+           CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+           DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred))%>%     gather(Regression, Prediction, -data, -week) %>%
+    mutate(Observed = map(data, pull, Trip_Count),
+           Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+           MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+           sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+
+week_predictions
+```
+
+The returned "tibble" (an other form of table) shows the mean absolute error for each regression. We can see the regression that consider time, space, weather, and time lags (Reg4) has the lowest mean absolute error. Others regression have errors at a relatively high level, meaning that time lag really made a difference here.
+
+## Examine Error Metrics for Accuracy
+
+Fig 8 visualizes the comparison of errors across the four models. 
+
+```{r plot_errors_by_model }
+week_predictions %>%
+  dplyr::select(week, Regression, MAE) %>%
+  gather(Variable, MAE, -Regression, -week) %>%
+  ggplot(aes(week, MAE)) + 
+    geom_bar(aes(fill = Regression), position = "dodge", stat="identity") +
+    scale_fill_manual(values = palette5) +
+    labs(title = "Mean Absolute Errors by model specification and week", caption = "Fig 8") +
+  plotTheme()
+```
+
+```{r error_vs_actual_timeseries , warning = FALSE, message = FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start.station.id = map(data, pull, start.station.id)) %>%
+    dplyr::select(interval60, start.station.id, Observed, Prediction, Regression) %>%
+    unnest() %>%
+    gather(Variable, Value, -Regression, -interval60, -start.station.id) %>%
+    group_by(Regression, Variable, interval60) %>%
+    summarize(Value = sum(Value)) %>%
+    ggplot(aes(interval60, Value, colour=Variable)) + 
+      geom_line(size = 1.1) + 
+      facet_wrap(~Regression, ncol=1) +
+      labs(title = "Predicted/Observed bike share time series", subtitle = "Boston; A test set of 2 weeks",  x = "Hour", y= "Station Trips", caption = "Fig 9") +
+      plotTheme()
+```
+
+Again, apparently, Reg 4 with time lags has the lowest mean absolute error (MAE) below 1 for both weeks. Fig 9 shows the predicted trip count lay over observed trip count. Reg 4 with time lags fit the best. 
+
+## Error clustering
+
+Do these errors cluster like demand based on location? We will take our best model of fit (Reg 4) to map out errors in Boston. 
+
+```{r errors_by_station, warning = FALSE, message = FALSE }
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start.station.id = map(data, pull, start.station.id), 
+           start.station.latitude = map(data, pull, start.station.latitude), 
+           start.station.longitude = map(data, pull, start.station.longitude)) %>%
+    select(interval60, start.station.id, start.station.longitude, start.station.latitude, Observed, Prediction, Regression) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags") %>%
+  group_by(start.station.id, start.station.longitude, start.station.latitude) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+ggplot(.)+
+  geom_sf(data = BostonCensus, color = "grey", fill = "transparent")+
+  geom_point(aes(x = start.station.longitude, y = start.station.latitude, color = MAE), 
+             fill = "transparent", alpha = 0.4)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  labs(title="Mean Abs Error, Test Set, Model 4", caption = "Fig 10")+
+  mapTheme()
+```
+
+Indeed, the model is less accurate at the centeral bay area according to Fig 10. This means our model may predict less accurately around that area. However, most of MAEs are not too high and do not exceed 3, which is still acceptable. 
+
+## Space-Time Error Evaluation
+
+We are going to dissect our prediction a little more. Here we are determining wether the errors cluster based on time. 
+
+```{r obs_pred_all, warning=FALSE, message = FALSE, cache=TRUE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start.station.id = map(data, pull, start.station.id), 
+           start.station.latitude = map(data, pull, start.station.latitude), 
+           start.station.longitude = map(data, pull, start.station.longitude),
+           dotw = map(data, pull, dotw)) %>%
+    select(interval60, start.station.id, start.station.longitude, 
+           start.station.latitude, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+  ggplot()+
+  geom_point(aes(x= Observed, y = Prediction))+
+    geom_smooth(aes(x= Observed, y= Prediction), method = "lm", se = FALSE, color = "red")+
+    geom_abline(slope = 1, intercept = 0)+
+  facet_grid(time_of_day~weekend)+
+  labs(title="Observed vs Predicted",
+       x="Observed trips", 
+       y="Predicted trips", caption ="Fig 11")+
+  plotTheme()
+```
+
+Black lines in Fig 11 show perfect predictions. The redline shows the linear result based on reg4. The red lines are below the black lines, meaning we are under-predicting in general. The error varies more largely during the weekdays and at AM rush and PM rush. This is understandable because the actual trips also vary during these hours and days, whereas the trip pattern during weekends and non-rush hours are fairly consistent. 
+
+## Detailed Time-Space Error Map
+
+Fig 10 shows the aggregated result for MAE across all times. Here, we are going to look at MAE at different time period and see if errors are still location biased during different time.
+
+```{r station_summary, warning=FALSE, message = FALSE }
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start.station.id = map(data, pull, start.station.id), 
+           start.station.latitude = map(data, pull, start.station.latitude), 
+           start.station.longitude = map(data, pull, start.station.longitude),
+           dotw = map(data, pull, dotw)) %>%
+    select(interval60, start.station.id, start.station.longitude, 
+           start.station.latitude, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  group_by(start.station.id, weekend, time_of_day, start.station.longitude, start.station.latitude) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  ggplot(.)+
+  geom_sf(data = BostonCensus, color = "grey", fill = "transparent")+
+  geom_point(aes(x = start.station.longitude, y = start.station.latitude, color = MAE), 
+             fill = "transparent", size = 0.5, alpha = 0.4)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  facet_grid(weekend~time_of_day)+
+  labs(title="Mean Absolute Errors, Test Set", caption = "Fig 12")+
+  mapTheme()
+```
+
+Fig 12 does show that errors cluster at the central bay area regardless of time. The model predicts the worst at PM rush hours at the central bay area. It is good that we don't see much blue on the map, indicating a higher MAE. Most MAEs are in the range of 0 to 3. Most of them are under-predicted. This observation could remind the company that during rush hours, it is probably wise to add 3 bikes on top of what the model predicts during rush hours at high demand area when re-balancing the bikes. 
+
+# Cross-validation: K-Fold
+
+We just see some error clustering based on time and space. So can our model generalize well? This section runs two k-fold validation: one on station location and one on time across all five weeks we used for training and testing. 
+
+```{r K-Fold, message = FALSE}
+
+ride.panel5week <-
+  ride.panel5week %>%
+  mutate(hour=hour(interval60))
+
+reg.vars <-
+  c("hour", "dotw", "Temperature","Precipitation", "lagHour","lag2Hours","lag3Hours","lag12Hours","lag1day","lag1week")
+
+ride.panel5week <-
+  ride.panel5week %>%
+  st_as_sf(coords = c("start.station.longitude", "start.station.latitude"))
+
+
+reg.cv <- crossValidate(
+  dataset = ride.panel5week,
+  id = "start.station.name",
+  dependentVariable = "Trip_Count",
+  indVariables = reg.vars) %>%
+    dplyr::select(start.station.name = start.station.name, Trip_Count, Prediction)
+
+reg.cv.time <- crossValidate(
+  dataset = ride.panel5week,
+  id = "dotw",
+  dependentVariable = "Trip_Count",
+  indVariables = reg.vars) %>%
+    dplyr::select("Day_of_the_Week" = dotw, Trip_Count, Prediction)
+
+reg.summary.space <-
+  mutate(reg.cv, Error = Prediction - Trip_Count,
+                             Regression = "Random k-fold CV: Space (Station)")
+
+reg.summary.time <-
+  reg.cv.time %>%
+  mutate(reg.cv.time, Error = Prediction - Trip_Count,
+                             Regression = "Random k-fold CV: Time (Day of the   Week)")
+
+```
+
+```{r Mean MAE, results = 'asis'}
+error.fold.space <- 
+  reg.summary.space %>%
+    group_by(start.station.name) %>% 
+    summarize(Mean_Error = mean(Prediction - Trip_Count, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+plot1<-
+  error.fold.space %>%
+  ggplot(aes(MAE)) + 
+    geom_histogram(bins = 30, colour="black", fill = "#FDE725FF") +
+    geom_vline(xintercept = 0) + scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
+    labs(title="Distribution of MAE", subtitle = "k-fold cross validation: Station Location",
+         x="Mean Absolute Error", y="Count") +
+    plotTheme()
+
+error.fold.time <- 
+  reg.summary.time %>%
+    group_by(Day_of_the_Week) %>% 
+    summarize(Mean_Error = mean(Prediction - Trip_Count, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+plot2 <-
+error.fold.time %>%
+  ggplot(aes(MAE)) + 
+    geom_histogram(bins = 30, colour="black", fill = "#FDE725FF") +
+    geom_vline(xintercept = 0) + scale_x_continuous(breaks = seq(0, 0.2, by = 0.01)) + 
+    labs(title="Distribution of MAE", subtitle = "k-fold cross validation: Day of the Week",
+         x="Mean Absolute Error", y="Count")+
+  plotTheme()
+
+grid.arrange(plot1,plot2,top="Fig 13. K-Fold of Bikeshare Trip Counts by Station and Day of the Week")
+
+st_drop_geometry(error.fold.space) %>%
+   summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable(caption = "Table 2. K-fold Error by Station Location - Mean Absolute Error (MAE) and Standard Deviation of MAE") %>%
+    kable_styling()
+
+st_drop_geometry(error.fold.time) %>%
+  summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable(caption = "Table 3. K-fold Error by Day of the Week - Mean Absolute Error (MAE) and Standard Deviation of MAE") %>%
+    kable_styling()
+```
+
+Fig 12 plots the distribution of MAE based on time and space. Most of the MAEs on station location are concentrated around 1, followed by 0. This shows that our model generalizes fine over station location, mostly only off by 1 trip count.
+
+It generalizes exceptionally for time. Fig 13 shows that the MAEs for k-fold based on time are well below 0, altering between 0.01 and 0.15. 
+
+Table 2 and 3 show the mean of MAE for k-fold on space and time respectively. Again, Table 3 suggests that our model generalizes superbly on time - with only 0.05 mean MAE and 0.05 MAE standard deviation. It also does not generalize too badly based on geography. The MAE is controlled under 1, and the standard deviation is under 2, meaning the MAE does not vary too much. 
+
+# Conclusion
+
+In this analysis, we found out that the model of the best fit is the one that incorporates location, weather, and time lags. After training, testing, and cross-validating our model, the model seems to predict effectively (with mean absolute error below five) and generalizes well across time and space. Based on the results, the model is recommended for the re-distributing plan for predicting the demand. 
+
+Notably that the model generalizes much better on time than location. This means that it is slightly unreliable on predicting the demand when it comes to location , especially during PM rush hours. The errors show that we are generally under-predicting, it is wise, thus, to redistribute 3 (the maximum absolute error) more bikes at high demand region (i.e. the central bay area) on top of the predicted demand during these hours to compensate for the errors. 
+
+Note that this analysis does not include any social-economical factors or neighborhood effect into account. For example, the demand could be related to the income level and employment rate of the neighborhood where a station locates. The model may be strengthened by considering these social-economical factors, which could essentially reduce error clustering over geography. 
+
+Also note this regression model only tells the demand. In order to implement the re-balancing plan, a real-time monitoring system should also be set up and sends signals at certain hour, when it senses that there is a lack of bikes at this particular station. 
