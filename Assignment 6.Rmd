@@ -1,5 +1,5 @@
 ---
-title: "Rebalancing Bikeshare in Boston"
+title: "Rebalancing Bike share in Boston"
 knit: (function(input_file, encoding) {
   out_dir <- 'docs';
   rmarkdown::render(input_file,
@@ -23,9 +23,11 @@ knitr::opts_chunk$set(echo = TRUE, results = FALSE, Warning = FALSE, Message = F
 
 Bike share system provides shared bike services for short travelling purposes. One may borrow a bike at a bike-share station, and return it at another station within the same system close to the destination. The system may be operated by a private company or a public municipality, usually with a fee.
 
-"Re-balancing", in terms of a bike share system, refers to the process of reallocating available bikes at a given time according to the demand. Failure to meet the demand is undesirable for both the users and the bike share companies -- the former loss a mean of transportation and the later loss potential revenue. Therefore it is important to have a sense of how many people will pickup a bike at a certain time and station -- in order to redistribute excessive bikes at other locations to stations that actually have high demand. Usually re-balancing will take place manually by small trucks to move the bikes around. 
+"Re-balancing", in terms of a bike-share system, refers to the process of reallocating available bikes at a given time according to the demand. Failure to meet the demand is undesirable for both the users and the bike share companies -- the former loses a means of transportation and the latter loses potential revenue. Therefore it is important to have a sense of how many people will pick up a bike at a certain time and station -- in order to redistribute excessive bikes at other locations to stations that actually have high demand. Usually, re-balancing will take place manually by small trucks to move the bikes around.
 
-The analysis below will examine the bike demand in Boston, MA in August and September 2019. "Bluebikes" is a private company that operates the bike share system in the city. It employs 4-5 rebalancing vans, each with a payload of 20-25 bikes, to redistribute bicycles 24 hours a day, 7 days a week. A regression model is developed based on weather and one-hour to one-week time lag to predict the number of trips that occur at a particular time and station. Since the company is redistributing bikes every hour, one-hour time lag is appropriate, because that will allow the van-driver to know an hour beforehand on the demand of bikes at different locations. Other time lags are added to strengthen the model.
+
+
+The analysis below will examine the bike demand in Boston, MA in August and September 2019. "Bluebikes" is a private company that operates the bike share system in the city. It employs 4-5 rebalancing vans, each with a payload of 20-25 bikes, to redistribute bicycles 24 hours a day, 7 days a week. A regression model is developed based on weather and one-hour to one-week time lag to predict the number of trips that occur at a particular time and station. Since the company is redistributing bikes every hour, a one-hour time lag is appropriate, because that will allow van drivers to know an hour beforehand on the demand of bikes at different locations. Other time lags are added to strengthen the model.
 
 ```{r setup_13, cache=TRUE, message=FALSE, include = FALSE}
 library(tidyverse)
@@ -91,7 +93,7 @@ census_api_key("e79f3706b6d61249968c6ce88794f6f556e5bf3d", overwrite = TRUE)
 
 ## Import Bike Trip Data 
 
-Data from August and September 2019 is used, because the temperaturere in Boston is pretty pleasant during that time of the year. The data is downloaded from Bluebikes website, which is public for all.  
+Data from August and September 2019 is used, because the temperature in Boston is pretty pleasant during that time of the year. The public data is downloaded from Bluebikes website.
 
 ```{r Input Data and create time bins}
 dat <- rbind(read.csv("201908boston.csv"),read.csv("201909boston.csv"))
@@ -209,17 +211,17 @@ ggplot(dat_census %>%
          group_by(interval60) %>%
          tally())+
   geom_line(aes(x = interval60, y = n))+
-  labs(title="Bike share trips per hr. Boston, August and September, 2019",
+  labs(title="Bike share trips per hr. Boston,\n August and September, 2019",
        x="Date", 
        y="Number of trips", caption = "Fig 2")+
   plotTheme()
 ```
 
-We may detect a pattern in Fig 2. The trips are occurring at a consistent trend weekly. For every ten spikes, there are two dips. The two dips occur during the weekends, and the ten spikes occur during the weekday with two rush hours: one in the morning and one in the evening. Note that there is a sharp decrease on Sept. 2, that was the labour day in 2019. 
+We may detect a pattern in Fig 2. The trips are occurring at a consistent trend weekly. For every ten spikes, there are two dips. The two dips occur during the weekends, and the ten spikes occur during the weekday with two rush hours: one in the morning and one in the evening. Note that there is a sharp decrease on Sept. 2. That was the labor day in 2019. 
 
 ## Rush Hours
 
-From Fig. 2, we can see that some hours have consistently high demand. It is worthwhile to categorize time into ranges based on these rush hours and see if they play a big role in telling the number of trips.
+From Fig. 2, we can see that some hours have a consistent high demand. It is worthwhile to categorize time into ranges based on these rush hours and see if they play a big role in telling the number of trips.
 
 ```{r mean_trips_hist, warning = FALSE, message = FALSE }
 dat_census %>%
@@ -233,7 +235,7 @@ dat_census %>%
   summarize(mean_trips = mean(n))%>%
   ggplot()+
   geom_histogram(aes(mean_trips), binwidth = 1)+
-  labs(title="Mean Number of Hourly Trips Per Station. Boston, August and Sepetember, 2019",
+  labs(title="Mean Number of Hourly Trips Per Station. Boston, \nAugust and Sepetember, 2019",
        x="Number of trips", 
        y="Frequency", caption = "Fig 3")+
   facet_wrap(~time_of_day)+
@@ -249,7 +251,7 @@ Is there a difference between weekend and weekday? Intuitively, we would like to
 ```{r trips_hour_dotw }
 ggplot(dat_census %>% mutate(hour = hour(starttime)))+
      geom_freqpoly(aes(hour, color = dotw), binwidth = 1)+
-  labs(title="Bike share trips in Chicago, by day of the week, August and September, 2019",
+  labs(title="Bike share trips in Boston, by day of the week, August and September, 2019",
        x="Hour", 
        y="Trip Counts", caption = "Fig 4")+
      plotTheme()
@@ -259,7 +261,7 @@ ggplot(dat_census %>%
          mutate(hour = hour(starttime),
                 weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday")))+
      geom_freqpoly(aes(hour, color = weekend), binwidth = 1)+
-  labs(title="Bike share trips in Boston - weekend vs weekday, August\n and September, 2019",
+  labs(title="Bike share trips in Boston - weekend vs weekday\n, August and September, 2019",
        x="Hour", 
        y="Trip Counts", caption = "Fig 5")+
      plotTheme()
@@ -313,7 +315,7 @@ ggplot()+
             aes(color = n))+
   scale_color_viridis(discrete = FALSE, option = "D",direction = -1)+
   facet_grid(weekend ~ time_of_day)+
-  labs(title="Bike share trips per hr by station. Boston, August and September, 2019", color = "Trip Count", caption="Fig 7")+
+  labs(title="Bike share trips per hr by station. Boston\n, August and September, 2019", color = "Trip Count", caption="Fig 7")+
   mapTheme()
   
 ```
